@@ -1,15 +1,18 @@
 from Crypto.Util.number import bytes_to_long, long_to_bytes
 from Crypto.Hash import keccak
-# import web3
-# from web3 import Web3
 from dataclasses import dataclass, field
 from typing import Union, Dict, Sequence, List, Tuple
 import requests
 import json
 import re
+import time
 
 
 ABI_ENDPOINT = 'https://api.etherscan.io/api?module=contract&action=getabi&address='
+
+# populate the standard erc20 method abi dictionary so we don't have to fetch it
+with open('erc20.json', 'r') as f:
+        erc20_abi_methods = json.load(f)
 
 class Transaction1559Payload:
     chain_id: int = 0
@@ -25,7 +28,8 @@ class Transaction1559Payload:
     signature_r: int = 0
     signature_s: int = 0
     
-        
+
+# Transaction1559Envelope is a class which encodes EIP-1559 transactions     
 class Transaction1559Envelope:
     transaction_type: bytes = b'0x02'
     payload: Transaction1559Payload = Transaction1559Payload()
@@ -36,6 +40,8 @@ class Transaction1559Envelope:
     def get_input(self):
         return self.payload.payload
 
+
+# TransactionLegacy is a class which encodes legacy type transactions
 class TransactionLegacy:
     signer_nonce: int = 0
     gas_price: int = 0
@@ -71,9 +77,12 @@ class TransactionLegacy:
 #     payload: Transaction2930Payload = Transaction2930Payload()
 
 
+# parse_int_from_bytes takes a byte string and returns a 64 bit int
 def parse_int_from_bytes(b):
     return bytes_to_long(b.lstrip(b'\x00'))
 
+
+# rlp_decode decodes a string according to the rlp specification
 def rlp_decode(string):
     if len(string) == 0:
         return b''
@@ -103,6 +112,9 @@ def rlp_decode(string):
             i += 1 + length_length + length
     return tuple(output) if len(output) > 1 else output[0]
 
+
+# parse_raw_transaction takes the hex of a raw transaction and returns a transaction object.
+# currently this only supports EIP-1559 and legacy transaction types.
 def parse_raw_transaction(raw_tx):
     if raw_tx.startswith('0x'):
         raw_tx = bytes.fromhex(raw_tx[2:])
@@ -149,17 +161,16 @@ def parse_raw_transaction(raw_tx):
 
         return tx
 
-    return transaction
 
-
-
-
+# decode_function_signature takes the function signature and returns the 4 byte method id
 def decode_function_signature(signature):
     k = keccak.new(digest_bits=256)
     k.update(signature.encode('utf_8'))
     return k.hexdigest()[:8]
 
 
+# get_function_signature takes a method and returns the method prototype 
+# (called the signature) which is hashed to find the method id
 def get_function_signature(func_dict):
     function_signature = ''
     if 'name' in func_dict.keys():
@@ -177,10 +188,12 @@ def get_function_signature(func_dict):
     return function_signature
 
 
-def create_abi_method_dict(abi_json):
+# create_abi_method_dict takes a list of abi methods and returns a dictionary 
+# of methods keyed by the 4 byte method ids
+def create_abi_method_dict(abi):
     methods = {}
 
-    for func_dict in abi_json[1:]:
+    for func_dict in abi[1:]:
         function_signature = get_function_signature(func_dict)     
         m_id = decode_function_signature(function_signature)
         methods[m_id] = func_dict
@@ -188,30 +201,31 @@ def create_abi_method_dict(abi_json):
     return methods
 
 
+# get_abi_methods takes a contract address and returns a dictionary with the abi specification
+# as a dictionary, where the keys are the 4 byte method ids of each function
 def get_abi_methods(contract):
     if not contract.startswith('0x'):
         contract = '0x' + contract
     response = requests.get('%s%s'%(ABI_ENDPOINT, contract))
     response_json = response.json()
+    # Workaround for using rate-limited api
+
+    if response_json['status'] == '0':
+        time.sleep(5)
+        response = requests.get('%s%s'%(ABI_ENDPOINT, contract))
+        response_json = response.json()
     abi_json = json.loads(response_json['result'])
-    return abi_json
+    return create_abi_method_dict(abi_json)
 
 
-def decode_tx_input(tx_in, tx_abi_methods):
-
-    if tx_in.startswith("0x"):
-        tx_in = tx_in[2:]
-    m_id = tx_in[0:8]
-    ptr = 8
-    
-    method = tx_abi_methods[m_id]
-    
+# decode_method_args takes a method abi and a list of raw argument data. 
+# it returns a list of decoded arguments with the fields 'name', 'type', 'value'
+# currently, it can only decode bytes, dynamic length arrays, uints, and addresses
+def decode_method_args(method_abi, method_args):
     tx_args = []
-    
-    offset = 64
+    ptr = 0
 
-    for arg in method['inputs']:
-        print(arg)
+    for arg in method_abi['inputs']:
         arg_type = arg['internalType']
 
         if re.match(r'bytes$', arg_type):
@@ -234,13 +248,13 @@ def decode_tx_input(tx_in, tx_abi_methods):
         # dynamic array
         elif re.match(r'\w+\[\]$', arg_type):
             val = []
-            temp_ptr = int(tx_in[ptr:ptr + offset].encode(), 16) * 2 + 8
-            array_length = int(tx_in[temp_ptr:temp_ptr + offset].encode(), 16)
-            temp_ptr += offset
+            temp_ptr = int(int(method_args[ptr].encode(), 16) / 32)
+            array_length = int(method_args[temp_ptr].encode(), 16)
+            temp_ptr += 1
             
             for _ in range(array_length):
-                val.append(tx_in[temp_ptr:temp_ptr + offset])
-                temp_ptr += offset
+                val.append(method_args[temp_ptr])
+                temp_ptr += 1
         # static array
         # elif re.match(r'\w+\[\d+\]$', arg_type):
         #     val = []
@@ -252,9 +266,9 @@ def decode_tx_input(tx_in, tx_abi_methods):
         # elif re.match(r'\(.*\)$', arg_type):
             # return 'tuple'
         elif re.match(r'uint\d*$', arg_type):
-            val = int(tx_in[ptr:ptr + offset].encode(), 16)
+            val = int(method_args[ptr].encode(), 16)
         elif re.match(r'address$', arg_type):
-            val = tx_in[ptr:ptr + offset][-40:]
+            val = method_args[ptr][-40:]
         # elif re.match(r'int\d*$', arg_type):
         #     val = parse_int_from_bytes(tx_in[ptr:ptr + offset])
         # elif re.match(r'bool$', arg_type):
@@ -268,10 +282,24 @@ def decode_tx_input(tx_in, tx_abi_methods):
 
         
         tx_args.append({'name': arg['name'], 'type': arg_type, 'value': val})
-        ptr += offset
+        ptr += 1
     return tx_args
 
 
+# decode_tx_input takes a transaction input and its abi, and returns a list of args.
+# Each arg has the fields 'name', 'type', 'value'
+def decode_tx_input(tx_in, tx_abi_methods):
+    if tx_in.startswith("0x"):
+        tx_in = tx_in[2:]
+    m_id = tx_in[0:8]
+    tx_in = tx_in[8:]
+    
+    method_abi = tx_abi_methods[m_id]
+    method_args = [tx_in[64*i:64*(i+1)] for i in range(int(len(tx_in)/64))]
+    return decode_method_args(method_abi, method_args)
+
+
+# get_method_name takes a transaction and its abi, and returns the name of the method invoked
 def get_method_name(tx, tx_abi_methods):
     tx_in = tx.get_input()
     if tx_in.startswith("0x"):
@@ -280,3 +308,43 @@ def get_method_name(tx, tx_abi_methods):
         m_id = tx_in[0:8]
 
     return tx_abi_methods[m_id]['name']
+
+
+# decode_logs takes in the tx receipt and the tx abi methods and returns a list of events.
+# Each event has a name and a list of arguments used
+def decode_logs(tx_receipt, tx_abi_methods):
+    events = []
+
+    tx_logs = tx_receipt['logs']
+
+    for log in tx_logs:
+
+        func_sig = log['topics'][0].hex()[2:10]
+        # event_args contains the arguments used by the event emitted
+        event_args = [arg.hex() for arg in log['topics'][1:]]
+        if log['data'] is not '':
+            extra_data = log['data'][2:]
+            event_args.extend([extra_data[64*i:64*(i+1)] for i in range(int(len(extra_data)/64))])
+        
+        # first search for method in the transaction abi (in case we get lucky)
+        if func_sig in tx_abi_methods.keys():
+            event_abi = tx_abi_methods[func_sig]
+        # next search for a standard erc20 method, in case it is being inherited 
+        elif func_sig in erc20_abi_methods.keys():
+            event_abi = erc20_abi_methods[func_sig]
+        # (most expensive) fetch the abi for the contract address of the event
+        else:
+            # current abi does not contain the event executed, so fetch the correct abi
+            event_abi_methods = get_abi_methods(log['address'])
+            try:
+                event_abi = event_abi_methods[func_sig]
+            except:
+                print('Unable to find abi methods for this log')
+
+        event_args = decode_method_args(event_abi, event_args)
+
+        events.append({'name': event_abi['name'], 'args': event_args})
+
+    return events
+
+
