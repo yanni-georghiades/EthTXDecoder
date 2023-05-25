@@ -220,7 +220,7 @@ def get_abi_methods(contract):
 
 # decode_method_args takes a method abi and a list of raw argument data. 
 # it returns a list of decoded arguments with the fields 'name', 'type', 'value'
-# currently, it can only decode bytes, dynamic length arrays, uints, and addresses
+# currently, it can only decode dynamic length arrays, uints, and addresses
 def decode_method_args(method_abi, method_args):
     tx_args = []
     ptr = 0
@@ -229,22 +229,9 @@ def decode_method_args(method_abi, method_args):
         arg_type = arg['internalType']
 
         if re.match(r'bytes$', arg_type):
-            pass
-            # num_bytes_remaining = parse_int_from_bytes(tx_in[ptr:ptr + offset])
-            # ptr += offset
-            # val = []
-            # while num_bytes_remaining > 0:
-            #     val.append(bytes(tx_in[ptr:ptr + offset]))
-            #     ptr += offset
-            #     num_bytes_remaining -= 32
-        # elif re.match(r'string$', arg_type):
-        #     num_bytes_remaining = parse_int_from_bytes(tx_in[ptr:ptr + offset])
-        #     ptr += offset
-        #     val = []
-        #     while num_bytes_remaining > 0:
-        #         val.append(bytes(tx_in[ptr:ptr + offset]).decode('utf-8'))
-        #         ptr += offset
-        #         num_bytes_remaining -= 32
+            raise ValueError(f'Type {arg_type} not supported')
+        elif re.match(r'string$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
         # dynamic array
         elif re.match(r'\w+\[\]$', arg_type):
             val = []
@@ -256,27 +243,23 @@ def decode_method_args(method_abi, method_args):
                 val.append(method_args[temp_ptr])
                 temp_ptr += 1
         # static array
-        # elif re.match(r'\w+\[\d+\]$', arg_type):
-        #     val = []
-        #     array_length = int(arg_type.split('[')[1][:-1])
-        #     for _ in range(array_length):
-        #         val.append(tx_in[ptr:ptr + offset])
-        #         ptr += offset
+        elif re.match(r'\w+\[\d+\]$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
         # tuple
-        # elif re.match(r'\(.*\)$', arg_type):
-            # return 'tuple'
+        elif re.match(r'\(.*\)$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
         elif re.match(r'uint\d*$', arg_type):
             val = int(method_args[ptr].encode(), 16)
         elif re.match(r'address$', arg_type):
             val = method_args[ptr][-40:]
-        # elif re.match(r'int\d*$', arg_type):
-        #     val = parse_int_from_bytes(tx_in[ptr:ptr + offset])
-        # elif re.match(r'bool$', arg_type):
-        #     return 'bool'
-        # elif re.match(r'fixed\d*x\d*$', arg_type):
-        #     val = False if uint256(tx_in[ptr:ptr + offset]) == 0 else 1
-        # elif re.match(r'ufixed\d*x\d*$', arg_type):
-        #     return 'ufixed'
+        elif re.match(r'int\d*$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
+        elif re.match(r'bool$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
+        elif re.match(r'fixed\d*x\d*$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
+        elif re.match(r'ufixed\d*x\d*$', arg_type):
+            raise ValueError(f'Type {arg_type} not supported')
         else:
             raise ValueError(f'Unknown type {arg_type}')
 
